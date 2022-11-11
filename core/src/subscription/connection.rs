@@ -346,7 +346,7 @@ pub struct Flow {
     pub gaps: HashMap<u32, u64>,
     /// data from the connection, limited to only store enough to reconstruct the first 15
     /// (hardcoded) bytes
-    data: Vec<Vec<u8>>,
+    pub data: Vec<Vec<u8>>,
     earliest: Option<u32>,
 }
 
