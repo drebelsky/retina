@@ -18,3 +18,5 @@ serde_json = "1.0.59"
 sha2 = "0.10.6"
 serde = { version = "1.0", features = ["derive"] }
 rand_chacha = "0.3.1"
+ip_network = "0.4.1"
+ip_network_table = "0.2.0"

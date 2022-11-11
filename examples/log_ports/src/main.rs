@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
+
+mod categorize_ip;
+use categorize_ip::{Category, Table, create_table, categorize};
 
 #[derive(Serialize)]
 enum IpType {
@@ -42,13 +45,17 @@ struct Args {
 }
 
 #[derive(Serialize)]
+struct IpData {
+    ip: [u8; 32],
+    port: u16,
+    kind: IpType,
+    category: Category,
+}
+
+#[derive(Serialize)]
 struct Data {
-    src_ip: [u8; 32],
-    src_port: u16,
-    src_type: IpType,
-    dst_ip: [u8; 32],
-    dst_port: u16,
-    dst_type: IpType,
+    src: IpData,
+    dst: IpData,
     proto: usize,
     ts: Duration,
 }
@@ -61,8 +68,8 @@ fn hash(ip: &[u8], salt: &[u8]) -> [u8; 32] {
     return hasher.finalize()[..].try_into().unwrap();
 }
 
-fn handle_ip(ip: IpAddr, salt: &[u8]) -> ([u8; 32], IpType) {
-    match ip {
+fn handle_ip(addr: SocketAddr, salt: &[u8], table: &Table) -> IpData {
+    let (ip, kind) = match addr.ip() {
         IpAddr::V4(ip) => (
             hash(&ip.octets(), salt),
             if ip.is_private() {
@@ -72,23 +79,23 @@ fn handle_ip(ip: IpAddr, salt: &[u8]) -> ([u8; 32], IpType) {
             },
         ),
         IpAddr::V6(ip) => (hash(&ip.octets(), salt), IpType::V6),
+    };
+    IpData{
+        ip,
+        port: addr.port(),
+        kind,
+        category: categorize(addr.ip(), table)
     }
 }
 
 impl Data {
-    fn from(conn: &Connection, ts: Duration, salt: &[u8]) -> Self {
+    fn from(conn: &Connection, ts: Duration, salt: &[u8], table: &Table) -> Self {
         let src = conn.five_tuple.orig;
         let dst = conn.five_tuple.resp;
         let proto = conn.five_tuple.proto;
-        let (src_ip, src_type) = handle_ip(src.ip(), salt);
-        let (dst_ip, dst_type) = handle_ip(dst.ip(), salt);
         Self {
-            src_ip,
-            src_port: src.port(),
-            src_type,
-            dst_ip,
-            dst_port: dst.port(),
-            dst_type,
+            src: handle_ip(src, salt, table),
+            dst: handle_ip(dst, salt, table),
             proto,
             ts,
         }
@@ -109,10 +116,12 @@ fn main() -> Result<()> {
     let mut salt: [u8; 512] = [0; 512];
     rng.fill_bytes(&mut salt);
 
+    let table = create_table();
+
     let start = Instant::now();
 
     let callback = |conn: Connection| {
-        let data = Data::from(&conn, conn.ts - start, &salt);
+        let data = Data::from(&conn, conn.ts - start, &salt, &table);
         let serialized = serde_json::to_string(&data).unwrap();
         let mut wtr = file.lock().unwrap();
         wtr.write_all(serialized.as_bytes()).unwrap();
