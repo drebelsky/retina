@@ -5,9 +5,9 @@ use retina_core::subscription::connection::Connection;
 use retina_core::Runtime;
 use retina_filtergen::filter;
 
+use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::Sha256;
-use hmac::{Hmac, Mac};
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -21,7 +21,7 @@ use anyhow::Result;
 use clap::Parser;
 
 mod categorize_ip;
-use categorize_ip::{Category, Table, create_table, categorize};
+use categorize_ip::{categorize, create_table, Category, Table};
 
 #[derive(Serialize)]
 enum IpType {
@@ -79,11 +79,11 @@ fn handle_ip(addr: SocketAddr, salt: &[u8], table: &Table) -> IpData {
         ),
         IpAddr::V6(ip) => (hmac(&ip.octets(), salt), IpType::V6),
     };
-    IpData{
+    IpData {
         ip,
         port: addr.port(),
         kind,
-        category: categorize(addr.ip(), table)
+        category: categorize(addr.ip(), table),
     }
 }
 
