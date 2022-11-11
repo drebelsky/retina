@@ -6,7 +6,8 @@ use retina_core::Runtime;
 use retina_filtergen::filter;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use hmac::{Hmac, Mac};
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -60,25 +61,23 @@ struct Data {
     ts: Duration,
 }
 
-// TODO: is this secure enough?
-fn hash(ip: &[u8], salt: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(salt);
-    hasher.update(ip);
-    return hasher.finalize()[..].try_into().unwrap();
+fn hmac(ip: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(salt).unwrap();
+    mac.update(ip);
+    return mac.finalize().into_bytes()[..].try_into().unwrap();
 }
 
 fn handle_ip(addr: SocketAddr, salt: &[u8], table: &Table) -> IpData {
     let (ip, kind) = match addr.ip() {
         IpAddr::V4(ip) => (
-            hash(&ip.octets(), salt),
+            hmac(&ip.octets(), salt),
             if ip.is_private() {
                 IpType::Private
             } else {
                 IpType::Public
             },
         ),
-        IpAddr::V6(ip) => (hash(&ip.octets(), salt), IpType::V6),
+        IpAddr::V6(ip) => (hmac(&ip.octets(), salt), IpType::V6),
     };
     IpData{
         ip,
@@ -113,7 +112,7 @@ fn main() -> Result<()> {
     let cnt = AtomicUsize::new(0);
 
     let mut rng = ChaCha20Rng::from_entropy();
-    let mut salt: [u8; 512] = [0; 512];
+    let mut salt: [u8; 256] = [0; 256];
     rng.fill_bytes(&mut salt);
 
     let table = create_table();
