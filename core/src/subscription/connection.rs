@@ -33,6 +33,7 @@ use crate::subscription::{Level, Subscribable, Subscription, Trackable};
 use serde::ser::{SerializeStruct, Serializer};
 use serde::Serialize;
 
+use core::mem::swap;
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
@@ -343,6 +344,10 @@ pub struct Flow {
     /// Maps relative sequence number of a content gap to the number of packets observed before it
     /// is filled. Only applies to TCP flows.
     pub gaps: HashMap<u32, u64>,
+    /// data from the connection, limited to only store enough to reconstruct the first 15
+    /// (hardcoded) bytes
+    data: Vec<Vec<u8>>,
+    earliest: Option<u32>,
 }
 
 impl Flow {
@@ -356,6 +361,8 @@ impl Flow {
             data_start: 0,
             capacity: 100, // temp hardcode for now
             chunks: Vec::with_capacity(100),
+            data: Vec::with_capacity(15),
+            earliest: None,
             gaps: HashMap::new(),
         }
     }
@@ -390,38 +397,115 @@ impl Flow {
         if self.chunks.len() < self.capacity {
             let seg_start = seq_no.wrapping_sub(self.data_start);
             let seg_end = seg_start + segment.length() as u32;
+            let seg_data = match self.earliest {
+                Some(earliest) => {
+                    if (seg_start - earliest) < 15 {
+                        let to_read =
+                            std::cmp::min(15 - (seg_start - earliest) as usize, segment.length());
+                        Some(
+                            segment
+                                .mbuf_ref()
+                                .get_data_slice(segment.offset(), to_read)
+                                .unwrap() // panic if we couldn't actually read the data from the segment
+                                .to_vec(),
+                        )
+                    } else {
+                        None
+                    }
+                }
+                None => {
+                    let to_read = std::cmp::min(15, segment.length());
+                    Some(
+                        segment
+                            .mbuf_ref()
+                            .get_data_slice(segment.offset(), to_read)
+                            .unwrap() // panic if we couldn't actually read the data from the segment
+                            .to_vec(),
+                    )
+                }
+            };
 
-            self.merge_chunk(Chunk(seg_start, seg_end));
+            self.merge_chunk(seg_start, seg_end, seg_data);
         }
     }
 
     /// Insert `chunk` into flow, merging intervals as necessary. Flow `chunks` are a sorted set of
     /// non-overlapping intervals.
     #[inline]
-    fn merge_chunk(&mut self, chunk: Chunk) {
-        let mut start = chunk.0;
-        let mut end = chunk.1;
-
+    fn merge_chunk(&mut self, mut start: u32, mut end: u32, mut new_data: Option<Vec<u8>>) {
         let mut result = vec![];
+        let mut orig_data: Vec<Vec<u8>> = vec![];
+        swap(&mut self.data, &mut orig_data);
         let mut inserted = false;
-        for chunk in self.chunks.iter() {
-            if inserted || start > chunk.1 {
-                result.push(*chunk);
-            } else if end < chunk.0 {
-                inserted = true;
-                result.push(Chunk(start, end));
-                result.push(*chunk);
-            } else {
-                start = std::cmp::min(start, chunk.0);
-                end = std::cmp::max(end, chunk.1);
+        match self.earliest {
+            Some(beg) => {
+                let mut data_iter = orig_data.into_iter();
+                for chunk in self.chunks.iter() {
+                    let chunk_data = data_iter.next();
+                    if inserted || start > chunk.1 {
+                        result.push(*chunk);
+                        if (chunk.0 - beg) < 15 {
+                            // We should panic in the case where there is not data for this chunk
+                            self.data.push(chunk_data.unwrap());
+                        }
+                    } else if end < chunk.0 {
+                        inserted = true;
+                        // TODO: remove clone (currently needed to satisfy the borrow checker)
+                        if let Some(data) = new_data.clone() {
+                            self.data.push(data);
+                        }
+                        result.push(Chunk(start, end));
+                        if (chunk.0 - beg) < 15 {
+                            self.data.push(chunk_data.unwrap());
+                        }
+                        result.push(*chunk);
+                    } else {
+                        if chunk.0 <= start && chunk.1 >= end {
+                            new_data = chunk_data;
+                        } else if chunk.0 < start {
+                            // .unwrap() because we should panic in the case where there is not data for the chunk we're merging
+                            new_data = match new_data {
+                                Some(cur) => {
+                                    let mut combined = chunk_data.unwrap();
+                                    let duplicates: usize = (chunk.1 - start) as usize;
+                                    combined.extend_from_slice(&cur[duplicates..]);
+                                    Some(combined)
+                                }
+                                None => {
+                                    if (chunk.0 - beg) < 15 {
+                                        Some(chunk_data.unwrap())
+                                    } else {
+                                        None
+                                    }
+                                }
+                            };
+                            start = chunk.0;
+                        } else if chunk.1 > end {
+                            if (chunk.0 - beg) < 15 {
+                                let duplicates: usize = (end - chunk.0) as usize;
+                                let mut cur = new_data.unwrap();
+                                cur.extend_from_slice(&chunk_data.unwrap()[duplicates..]);
+                                new_data = Some(cur);
+                            }
+                            end = chunk.1;
+                        }
+                    }
+                }
+                if !inserted {
+                    result.push(Chunk(start, end));
+                    if let Some(data) = new_data {
+                        self.data.push(data);
+                    }
+                }
+                for chunk in result[..result.len() - 1].iter() {
+                    *self.gaps.entry(chunk.1).or_insert(0) += 1;
+                }
             }
-        }
-        if !inserted {
-            result.push(Chunk(start, end));
-        }
-
-        for chunk in result[..result.len() - 1].iter() {
-            *self.gaps.entry(chunk.1).or_insert(0) += 1;
+            None => {
+                self.earliest = Some(start);
+                result.push(Chunk(start, end));
+                self.data.push(new_data.unwrap());
+            }
         }
 
         if result.len().saturating_sub(1) as u64 > self.max_simult_gaps {
@@ -483,52 +567,75 @@ pub struct Chunk(u32, u32);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Range;
+
+    fn to_vec(r: Range<u8>) -> Vec<u8> {
+        r.collect::<Vec<u8>>()
+    }
 
     #[test]
     fn core_merge_chunk_fill_single() {
         let mut flow = Flow::new();
         flow.chunks = vec![Chunk(0, 3), Chunk(4, 5)];
-        flow.merge_chunk(Chunk(3, 4));
+        flow.data = vec![to_vec(0..3), to_vec(4..5)];
+        flow.earliest = Some(0);
+        flow.merge_chunk(3, 4, Some(vec![3]));
         assert_eq!(flow.chunks, vec![Chunk(0, 5)]);
+        assert_eq!(flow.data[0], vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
     fn core_merge_chunk_fill_multiple() {
         let mut flow = Flow::new();
         flow.chunks = vec![Chunk(0, 3), Chunk(4, 5), Chunk(8, 10)];
-        flow.merge_chunk(Chunk(2, 12));
+        flow.data = vec![to_vec(0..3), to_vec(4..5), to_vec(8..10)];
+        flow.earliest = Some(0);
+        flow.merge_chunk(2, 12, Some(to_vec(2..12)));
         assert_eq!(flow.chunks, vec![Chunk(0, 12)]);
+        assert_eq!(flow.data, vec![to_vec(0..12)]);
     }
 
     #[test]
     fn core_merge_chunk_create_hole() {
         let mut flow = Flow::new();
         flow.chunks = vec![Chunk(0, 3), Chunk(8, 10)];
-        flow.merge_chunk(Chunk(4, 5));
+        flow.data = vec![to_vec(0..3), to_vec(8..10)];
+        flow.earliest = Some(0);
+        flow.merge_chunk(4, 5, Some(to_vec(4..5)));
         assert_eq!(flow.chunks, vec![Chunk(0, 3), Chunk(4, 5), Chunk(8, 10)]);
+        assert_eq!(flow.data, vec![to_vec(0..3), to_vec(4..5), to_vec(8..10)]);
     }
 
     #[test]
     fn core_merge_chunk_fill_overlap() {
         let mut flow = Flow::new();
         flow.chunks = vec![Chunk(0, 3), Chunk(8, 10)];
-        flow.merge_chunk(Chunk(5, 9));
+        flow.data = vec![to_vec(0..3), to_vec(8..10)];
+        flow.earliest = Some(0);
+        flow.merge_chunk(5, 9, Some(to_vec(5..9)));
         assert_eq!(flow.chunks, vec![Chunk(0, 3), Chunk(5, 10)]);
+        assert_eq!(flow.data, vec![to_vec(0..3), to_vec(5..10)]);
     }
 
     #[test]
     fn core_merge_chunk_start() {
         let mut flow = Flow::new();
         flow.chunks = vec![Chunk(4, 6), Chunk(8, 10)];
-        flow.merge_chunk(Chunk(0, 2));
+        flow.data = vec![to_vec(4..6), to_vec(8..10)];
+        flow.earliest = Some(4);
+        flow.merge_chunk(0, 2, Some(to_vec(0..2)));
         assert_eq!(flow.chunks, vec![Chunk(0, 2), Chunk(4, 6), Chunk(8, 10)]);
+        assert_eq!(flow.data, vec![to_vec(0..2), to_vec(4..6), to_vec(8..10)]);
     }
 
     #[test]
     fn core_merge_chunk_end() {
         let mut flow = Flow::new();
         flow.chunks = vec![Chunk(4, 6), Chunk(8, 10)];
-        flow.merge_chunk(Chunk(11, 15));
+        flow.data = vec![to_vec(4..6), to_vec(8..10)];
+        flow.earliest = Some(4);
+        flow.merge_chunk(11, 15, Some(to_vec(11..15)));
         assert_eq!(flow.chunks, vec![Chunk(4, 6), Chunk(8, 10), Chunk(11, 15)]);
+        assert_eq!(flow.data, vec![to_vec(4..6), to_vec(8..10), to_vec(11..15)]);
     }
 }
