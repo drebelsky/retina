@@ -27,7 +27,6 @@ use categorize_ip::{categorize, create_table, Category, Table};
 enum IpType {
     Private,
     Public,
-    V6, // TODO: is there a way to distinguish public/private in this case?
 }
 
 // Define command-line arguments.
@@ -77,7 +76,16 @@ fn handle_ip(addr: SocketAddr, salt: &[u8], table: &Table) -> IpData {
                 IpType::Public
             },
         ),
-        IpAddr::V6(ip) => (hmac(&ip.octets(), salt), IpType::V6),
+        IpAddr::V6(ip) => (
+            hmac(&ip.octets(), salt),
+            if (ip.segments()[0] & 0xfe00) == 0xfc00 {
+                // is_unique_local() is unstable, just use source code
+                // https://doc.rust-lang.org/stable/src/std/net/ip_addr.rs.html#1417-1419
+                IpType::Private
+            } else {
+                IpType::Public
+            },
+        ),
     };
     IpData {
         ip,
