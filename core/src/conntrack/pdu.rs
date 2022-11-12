@@ -47,6 +47,11 @@ impl L4Pdu {
     }
 
     #[inline]
+    pub(crate) fn proto(&self) -> usize {
+        self.ctxt.proto
+    }
+
+    #[inline]
     pub(crate) fn seq_no(&self) -> u32 {
         self.ctxt.seq_no
     }
