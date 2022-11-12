@@ -435,12 +435,14 @@ impl Flow {
                     }
                 }
                 let begin = self.earliest.unwrap();
-                for i in 0..std::cmp::min(
-                    std::cmp::min(16, (begin + 16 - seg_start) as usize),
-                    seg_data.len(),
-                ) {
-                    self.first_bytes[seg_start as usize + i] = seg_data[seg_start as usize + i];
-                    self.first_bytes_set[seg_start as usize + i] = true;
+                if seg_start < (begin + 16) {
+                    for i in 0..std::cmp::min(
+                        std::cmp::min(16, (begin + 16 - seg_start) as usize),
+                        seg_data.len(),
+                    ) {
+                        self.first_bytes[seg_start as usize + i] = seg_data[seg_start as usize + i];
+                        self.first_bytes_set[seg_start as usize + i] = true;
+                    }
                 }
             }
             _ => {
