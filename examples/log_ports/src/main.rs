@@ -60,6 +60,8 @@ struct Data {
     ts: Duration,
     orig_data: Vec<u8>,
     resp_data: Vec<u8>,
+    total_bytes: u64,
+    total_pkts: u64,
 }
 
 fn hmac(ip: &[u8], salt: &[u8]) -> [u8; 32] {
@@ -112,6 +114,8 @@ impl Data {
             resp_data,
             proto,
             ts,
+            total_bytes: conn.total_bytes(),
+            total_pkts: conn.total_pkts(),
         }
     }
 }
