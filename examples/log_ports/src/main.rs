@@ -2,6 +2,7 @@ use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use retina_core::config::load_config;
 use retina_core::subscription::connection::Connection;
+use retina_core::utils::base64;
 use retina_core::Runtime;
 use retina_filtergen::filter;
 
@@ -46,6 +47,7 @@ struct Args {
 
 #[derive(Serialize)]
 struct IpData {
+    #[serde(serialize_with = "base64::serialize")]
     ip: [u8; 32],
     port: u16,
     kind: IpType,
@@ -58,7 +60,9 @@ struct Data {
     resp: IpData,
     proto: usize,
     ts: Duration,
+    #[serde(serialize_with = "base64::serialize")]
     orig_data: Vec<u8>,
+    #[serde(serialize_with = "base64::serialize")]
     resp_data: Vec<u8>,
     total_bytes: u64,
     total_pkts: u64,
