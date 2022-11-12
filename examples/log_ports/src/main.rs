@@ -54,10 +54,12 @@ struct IpData {
 
 #[derive(Serialize)]
 struct Data {
-    src: IpData,
-    dst: IpData,
+    orig: IpData,
+    resp: IpData,
     proto: usize,
     ts: Duration,
+    orig_data: Vec<u8>,
+    resp_data: Vec<u8>,
 }
 
 fn hmac(ip: &[u8], salt: &[u8]) -> [u8; 32] {
@@ -97,12 +99,17 @@ fn handle_ip(addr: SocketAddr, salt: &[u8], table: &Table) -> IpData {
 
 impl Data {
     fn from(conn: &Connection, ts: Duration, salt: &[u8], table: &Table) -> Self {
-        let src = conn.five_tuple.orig;
-        let dst = conn.five_tuple.resp;
+        let orig = conn.five_tuple.orig;
+        let resp = conn.five_tuple.resp;
         let proto = conn.five_tuple.proto;
+        let orig_data = conn.orig.data();
+        let resp_data = conn.resp.data();
+
         Self {
-            src: handle_ip(src, salt, table),
-            dst: handle_ip(dst, salt, table),
+            orig: handle_ip(orig, salt, table),
+            resp: handle_ip(resp, salt, table),
+            orig_data,
+            resp_data,
             proto,
             ts,
         }
